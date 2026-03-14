@@ -1,134 +1,154 @@
 import logging
 import time
-from datetime import datetime, timedelta
-
-import pandas as pd
 import requests
+import pandas as pd
+from datetime import timedelta, datetime
 from airflow.sdk import DAG
-from airflow.providers.standard.operators.empty import EmptyOperator
-from airflow.providers.standard.operators.python import PythonOperator
+from airflow.operators.empty import EmptyOperator
+from airflow.operators.python import PythonOperator
+from airflow.exceptions import AirflowException
 
 log = logging.getLogger(__name__)
 
-# ------------------------------------------------------------------
-# Task callable
-# ------------------------------------------------------------------
-
 def ingest_taxi_data(**context) -> str:
     """
-    PythonOperator callable that downloads NYC Yellow Taxi Trip Records,
-    validates row count, and pushes the local file path to XCom.
+    Downloads NYC Yellow Taxi Trip Records CSV (capped at ROW_LIMIT rows),
+    validates row count, and pushes the file path to XCom for downstream tasks.
+
+    Args:
+        **context: Airflow context dictionary injected by the PythonOperator.
 
     Returns:
-        str: Local path where the raw CSV was saved.
+        str: Local file path of the downloaded CSV.
 
     Raises:
-        RuntimeError: If the file cannot be downloaded after all retries,
-                        or if the downloaded file has fewer than 1 000 rows.
+        AirflowException: If all retry attempts fail or row count validation fails.
     """
     DOWNLOAD_URL = "https://data.cityofnewyork.us/api/views/t29m-gskq/rows.csv"
     LOCAL_PATH = "/tmp/nyc_taxi_raw.csv"
-    MIN_ROW_THRESHOLD = 1_000
+    ROW_LIMIT = 1000        # Maximum data rows to retain (excludes header)
+    MIN_ROW_COUNT = 100     # Sanity-check floor — fail if source returns fewer
     MAX_RETRIES = 3
-    RETRY_BACKOFF_SECONDS = 5   # doubles each attempt: 5s → 10s → 20s
-    CHUNK_SIZE = 8_192          # bytes per streaming chunk
+    RETRY_DELAY_SECONDS = 5
+    CHUNK_SIZE = 8192       # 8 KB chunks for memory-efficient streaming
 
-    # --------------------------------------------------------------
-    # 1. Stream-download with retry logic
-    # --------------------------------------------------------------
-    last_exception: Exception | None = None
+    # ------------------------------------------------------------------ #
+    # 1. Stream-download with retry logic                                  #
+    # ------------------------------------------------------------------ #
+    last_exception = None
 
     for attempt in range(1, MAX_RETRIES + 1):
         try:
-            log.info(
-                "Download attempt %d/%d — URL: %s",
-                attempt, MAX_RETRIES, DOWNLOAD_URL,
+            log.info("Download attempt %d/%d — URL: %s", attempt, MAX_RETRIES, DOWNLOAD_URL)
+
+            response = requests.get(
+                DOWNLOAD_URL,
+                stream=True,
+                timeout=(10, 60),  # (connect timeout, read timeout) in seconds
+                headers={"User-Agent": "AirflowNYCTaxiPipeline/1.0"},
             )
+            response.raise_for_status()
 
-            with requests.get(DOWNLOAD_URL, stream=True, timeout=60) as response:
-                response.raise_for_status()
+            # ---------------------------------------------------------- #
+            # Stream line-by-line and stop once ROW_LIMIT lines written   #
+            # ---------------------------------------------------------- #
+            rows_written = 0          # counts data rows (header excluded)
+            header_written = False
 
-                total_bytes = 0
-                with open(LOCAL_PATH, "wb") as fh:
-                    for chunk in response.iter_content(chunk_size=CHUNK_SIZE):
-                        if chunk:   # filter keep-alive empty chunks
-                            fh.write(chunk)
-                            total_bytes += len(chunk)
+            with open(LOCAL_PATH, "wb") as fh:
+                for raw_line in response.iter_lines():
+                    if not raw_line:          # skip keep-alive empty lines
+                        continue
+
+                    line_bytes = raw_line + b"\n"
+
+                    if not header_written:    # always write the header first
+                        fh.write(line_bytes)
+                        header_written = True
+                        continue
+
+                    if rows_written >= ROW_LIMIT:
+                        log.info(
+                            "Row limit of %d reached — closing stream early.",
+                            ROW_LIMIT,
+                        )
+                        break
+
+                    fh.write(line_bytes)
+                    rows_written += 1
 
             log.info(
-                "Download complete — %.2f MB written to %s",
-                total_bytes / (1024 ** 2),
+                "Download complete — %d data rows written to %s",
+                rows_written,
                 LOCAL_PATH,
             )
-            break   # success — exit retry loop
+            break  # Success — exit retry loop
 
         except requests.exceptions.ConnectionError as exc:
             last_exception = exc
-            wait = RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
             log.warning(
-                "ConnectionError on attempt %d/%d: %s. Retrying in %ds …",
-                attempt, MAX_RETRIES, exc, wait,
+                "Connection error on attempt %d/%d: %s", attempt, MAX_RETRIES, exc
             )
-            time.sleep(wait)
-
+        except requests.exceptions.Timeout as exc:
+            last_exception = exc
+            log.warning(
+                "Request timed out on attempt %d/%d: %s", attempt, MAX_RETRIES, exc
+            )
         except requests.exceptions.HTTPError as exc:
-            raise RuntimeError(
-                f"HTTP error while downloading taxi data: {exc}"
+            raise AirflowException(
+                f"HTTP error — will not retry: {exc}"
             ) from exc
 
+        if attempt < MAX_RETRIES:
+            log.info("Retrying in %d seconds…", RETRY_DELAY_SECONDS)
+            time.sleep(RETRY_DELAY_SECONDS)
     else:
-        raise RuntimeError(
-            f"Failed to download NYC taxi data after {MAX_RETRIES} attempts. "
+        raise AirflowException(
+            f"All {MAX_RETRIES} download attempts failed. "
             f"Last error: {last_exception}"
-        )
+        ) from last_exception
 
-    # --------------------------------------------------------------
-    # 2. Row-count validation with pandas
-    # --------------------------------------------------------------
+    # ------------------------------------------------------------------ #
+    # 2. Row-count validation with pandas                                  #
+    # ------------------------------------------------------------------ #
     log.info("Validating downloaded file: %s", LOCAL_PATH)
 
-    df = pd.read_csv(LOCAL_PATH, low_memory=False)
-    row_count = len(df)
+    try:
+        df_index = pd.read_csv(LOCAL_PATH, usecols=[0], low_memory=True)
+        row_count = len(df_index)
+    except Exception as exc:
+        raise AirflowException(
+            f"Failed to read CSV for validation: {exc}"
+        ) from exc
 
-    log.info("Row count: %d", row_count)
+    log.info("Row count (excluding header): %d", row_count)
 
-    if row_count < MIN_ROW_THRESHOLD:
-        raise RuntimeError(
-            f"Validation failed — file contains only {row_count} rows "
-            f"(minimum expected: {MIN_ROW_THRESHOLD}). "
-            "The source may be empty or truncated."
+    if row_count < MIN_ROW_COUNT:
+        raise AirflowException(
+            f"Validation failed — expected at least {MIN_ROW_COUNT} rows, "
+            f"but found {row_count}. The file may be truncated or empty."
+        )
+
+    if row_count > ROW_LIMIT:
+        raise AirflowException(
+            f"Validation failed — file contains {row_count} rows, "
+            f"which exceeds the configured ROW_LIMIT of {ROW_LIMIT}."
         )
 
     log.info(
-        "Validation passed — %d rows meet the minimum threshold of %d.",
-        row_count, MIN_ROW_THRESHOLD,
+        "Row count validation passed (%d rows, within [%d, %d]).",
+        row_count, MIN_ROW_COUNT, ROW_LIMIT,
     )
 
-    # --------------------------------------------------------------
-    # 3. Push file path to XCom for downstream tasks
-    # --------------------------------------------------------------
-    ti = context["ti"]
-    ti.xcom_push(key="raw_file_path", value=LOCAL_PATH)
-    log.info("Pushed XCom key='raw_file_path' → '%s'", LOCAL_PATH)
+    # ------------------------------------------------------------------ #
+    # 3. Push file path and metadata to XCom for downstream tasks          #
+    # ------------------------------------------------------------------ #
+    context["ti"].xcom_push(key="raw_file_path", value=LOCAL_PATH)
+    context["ti"].xcom_push(key="raw_row_count", value=row_count)
+    log.info("Pushed file path and row count to XCom.")
 
-    return LOCAL_PATH   # also stored as the default XCom return value
+    return LOCAL_PATH
 
-# ------------------------------------------------------------------
-# Placeholder for a downstream task (e.g. cleaning / transformation)
-# ------------------------------------------------------------------
-
-def transform_taxi_data(**context) -> None:
-    ti = context["ti"]
-    raw_path = ti.xcom_pull(task_ids="ingest_taxi_data", key="raw_file_path")
-    log.info("Received raw file path from XCom: %s", raw_path)
-    # TODO: cleaning, anomaly removal, star-schema loading …
-
-    
-
-
-# ------------------------------------------------------------------
-# Default arguments applied to every task in the DAG
-# ------------------------------------------------------------------
 default_args = {
     "owner": "data-engineering",
     "depends_on_past": False,
@@ -139,11 +159,8 @@ default_args = {
     "retry_delay": timedelta(minutes=5),
 }
 
-# ------------------------------------------------------------------
-# DAG definition
-# ------------------------------------------------------------------
 with DAG(
-    dag_id="nyc_taxi_ingestion",
+    dag_id="2018_taxi_ingestion",
     default_args=default_args,
     description="Ingest NYC Yellow Taxi Trip Records CSV and validate",
     schedule=None,
@@ -151,18 +168,17 @@ with DAG(
     catchup=False,
     tags=["nyc-taxi", "ingestion"],
 ) as dag:
-    
-    # ------------------------------------------------------------------
-    # Task definitions
-    # ------------------------------------------------------------------
-    start_task = EmptyOperator(task_id="start_task")
-    
+
+    start = EmptyOperator(task_id="start_task")
+
     ingest_task = PythonOperator(
         task_id="ingest_taxi_data",
         python_callable=ingest_taxi_data,
-    )    
-    
-    # ------------------------------------------------------------------
-    # Task dependencies
-    # ------------------------------------------------------------------
-    start_task >> ingest_task
+    )
+
+    # transform_task = PythonOperator(
+    #     task_id="transform_taxi_data",
+    #     python_callable=transform_taxi_data,
+    # )
+
+    start >> ingest_task
