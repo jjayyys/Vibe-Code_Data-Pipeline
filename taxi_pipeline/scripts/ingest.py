@@ -33,7 +33,7 @@ def ingest_taxi_data(**context) -> str:
     CHUNK_SIZE = 8192       # 8 KB chunks for memory-efficient streaming
 
     # ------------------------------------------------------------------ #
-    # 1. Stream-download with retry logic                                  #
+    # 1. Stream-download with retry logic                                #
     # ------------------------------------------------------------------ #
     last_exception = None
 
