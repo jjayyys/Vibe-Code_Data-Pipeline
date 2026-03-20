@@ -113,27 +113,6 @@ def load_taxi_model(**context):
     logging.info("Load Complete!")
 
 
-# --- 4. The DAG Definition ---
-with DAG(
-    dag_id='nyc_taxi_pipeline',
-    start_date=datetime(2024, 1, 1),
-    schedule=None, # 🔴 เปลี่ยนเป็น None ก่อน เพื่อให้กดรันแบบ Manual ได้ง่ายๆ ไม่ต้องกังวลเรื่องเวลา
-    catchup=False
-) as dag:
 
-    task_clean = PythonOperator(
-        task_id='clean_taxi_data',
-        python_callable=clean_taxi_data,
-    )
-
-    task_transform = PythonOperator(
-        task_id='transform_taxi_data',
-        python_callable=transform_taxi_data,
-    )
-    
-    task_load = PythonOperator(
-        task_id='load_taxi_data',
-        python_callable=load_taxi_model,
-    )
 
     
