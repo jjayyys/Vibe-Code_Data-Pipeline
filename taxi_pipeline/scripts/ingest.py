@@ -3,9 +3,6 @@ import time
 import requests
 import pandas as pd
 from datetime import timedelta, datetime
-from airflow.sdk import DAG
-from airflow.operators.empty import EmptyOperator
-from airflow.operators.python import PythonOperator
 from airflow.exceptions import AirflowException
 
 log = logging.getLogger(__name__)
@@ -148,37 +145,3 @@ def ingest_taxi_data(**context) -> str:
     log.info("Pushed file path and row count to XCom.")
 
     return LOCAL_PATH
-
-default_args = {
-    "owner": "data-engineering",
-    "depends_on_past": False,
-    "email": ["de-alerts@yourcompany.com"],
-    "email_on_failure": True,
-    "email_on_retry": False,
-    "retries": 1,
-    "retry_delay": timedelta(minutes=5),
-}
-
-with DAG(
-    dag_id="2018_taxi_ingestion",
-    default_args=default_args,
-    description="Ingest NYC Yellow Taxi Trip Records CSV and validate",
-    schedule=None,
-    start_date=datetime(2026, 1, 1),
-    catchup=False,
-    tags=["nyc-taxi", "ingestion"],
-) as dag:
-
-    start = EmptyOperator(task_id="start_task")
-
-    ingest_task = PythonOperator(
-        task_id="ingest_taxi_data",
-        python_callable=ingest_taxi_data,
-    )
-
-    # transform_task = PythonOperator(
-    #     task_id="transform_taxi_data",
-    #     python_callable=transform_taxi_data,
-    # )
-
-    start >> ingest_task
