@@ -136,5 +136,4 @@ with DAG(
         python_callable=load_taxi_model,
     )
 
-    # 🔴 แก้ชื่อให้ตรงกับตัวแปรด้านบน
-    task_clean >> task_transform >> task_load
+    
