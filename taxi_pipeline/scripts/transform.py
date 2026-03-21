@@ -48,7 +48,7 @@ def transform_taxi_data(**context):
     df = df[(df['speed_mph'] <= 80) & (df['trip_duration_minutes'] >= 1)]
     logging.info(f"Filtered out {initial_row_count - len(df)} anomalous records.")
 
-    output_path = "/opt/airflow/dataset/nyc_taxi_transformed.csv"
+    output_path = "/opt/airflow/data/nyc_taxi_transformed.csv"
     df.to_csv(output_path, index=False)
     
     # 🔴 ดัน XCom ด้วยชื่อ transformed_path

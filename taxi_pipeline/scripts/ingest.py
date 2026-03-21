@@ -46,7 +46,7 @@ def ingest_taxi_data(**context) -> str:
             response.raise_for_status()
 
             # ---------------------------------------------------------- #
-            # Stream line-by-line and stop once ROW_LIMIT lines written   #
+            # Stream line-by-line and stop once ROW_LIMIT lines written  #
             # ---------------------------------------------------------- #
             rows_written = 0          # counts data rows (header excluded)
             header_written = False
@@ -105,7 +105,7 @@ def ingest_taxi_data(**context) -> str:
         ) from last_exception
 
     # ------------------------------------------------------------------ #
-    # 2. Row-count validation with pandas                                  #
+    # 2. Row-count validation with pandas                                #
     # ------------------------------------------------------------------ #
     log.info("Validating downloaded file: %s", LOCAL_PATH)
 
