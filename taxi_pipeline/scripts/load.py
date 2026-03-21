@@ -2,6 +2,7 @@ import logging
 import pandas as pd
 from sqlalchemy import create_engine
 from airflow.models import Variable
+from airflow.hooks.base import BaseHook
 
 def load_taxi_model(**context):
     """
@@ -11,7 +12,7 @@ def load_taxi_model(**context):
     # 1. Pull the transformed CSV path from XCom
     # Make sure 'task_ids' matches the actual name of your transform task
     ti = context['ti']
-    csv_path = ti.xcom_pull(key='output_path', task_ids='transform_taxi_data')
+    csv_path = ti.xcom_pull(key='transformed_path', task_ids='transform_taxi_data')
     
     if not csv_path:
         raise ValueError("No CSV path found in XCom. Check the upstream transform task.")
@@ -21,15 +22,11 @@ def load_taxi_model(**context):
     # 2. Load data with pandas
     df = pd.read_csv(csv_path)
 
-    # 3. Connect to MySQL using SQLAlchemy & Airflow Variables
-    # Note: Requires the 'pymysql' package installed in your Airflow Docker image
-    mysql_host = Variable.get("MYSQL_HOST")
-    mysql_user = Variable.get("MYSQL_USER")
-    mysql_pass = Variable.get("MYSQL_PASS")
-    mysql_db = Variable.get("MYSQL_DB")
+    # 3. Connect to MySQL using Airflow Connections
+    conn = BaseHook.get_connection('mydb')
     
     # Create connection string (using pymysql driver)
-    db_url = f"mysql+pymysql://{mysql_user}:{mysql_pass}@{mysql_host}/{mysql_db}"
+    db_url = f"mysql+pymysql://{conn.login}:{conn.password}@{conn.host}:{conn.port}/{conn.schema}"
     engine = create_engine(db_url)
 
     # 4. Create Star-Schema DataFrames

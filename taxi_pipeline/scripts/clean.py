@@ -10,7 +10,7 @@ def clean_taxi_data(**context):
     
     # 1. รับไฟล์มาจากเพื่อนที่ทำ Ingest (ต้องตกลงชื่อ task_id กับเพื่อนให้ตรงกันนะครับ)
     # สมมติว่าเพื่อนตั้งชื่อ task_id ว่า 'ingest_data_task'
-    raw_path = ti.xcom_pull(key="raw_file_path", task_ids="ingest_data_task")
+    raw_path = ti.xcom_pull(key="raw_file_path", task_ids="ingest_taxi_data")
     
     if not raw_path:
         raise ValueError("หาไฟล์จาก Ingest ไม่เจอ! เช็คว่าเพื่อนส่ง key='raw_path' และ task_ids ตรงกันไหม")
@@ -32,7 +32,7 @@ def clean_taxi_data(**context):
     df = df[(df['trip_distance'] > 0) & (df['trip_distance'] <= 100)]
     
     # กรองรหัสโซนสถานที่ (Location ID ของปี 2018 ต้องอยู่ระหว่าง 1 ถึง 265)
-    df = df[df['pulocationid'].between(1, 265) & df['dolocationid'].between(1, 265)]
+    df = df[df['PULocationID'].between(1, 265) & df['DOLocationID'].between(1, 265)]
     
     final_count = len(df)
     logging.info(f"ทำความสะอาดเสร็จสิ้น! ลบข้อมูลขยะไป: {initial_count - final_count} แถว. เหลือข้อมูลสุทธิ: {final_count} แถว")
